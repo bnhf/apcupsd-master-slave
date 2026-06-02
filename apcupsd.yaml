@@ -1,0 +1,61 @@
+services:
+  apcupsd: # This docker-compose typically requires no editing. Use the Environment variables section of Portainer to set your values.
+    # 2026.06.01
+    # GitHub home for this project: https://github.com/bnhf/apcupsd-admin-plus.
+    # Docker container home for this project with setup instructions: https://hub.docker.com/r/bnhf/apcupsd.
+    image: bnhf/apcupsd:${TAG:-latest} # Add the tag like latest or test to the environment variables below.
+    container_name: apcupsd
+    hostname: ${HOSTNAME} # Set a unique hostname per instance -- used in apcupsd-cgi and email notifications.
+    dns_search: ${DOMAIN:-localdomain} # LAN domain for hostname resolution (e.g. local, localdomain). Optionally append a Tailnet domain space-separated.
+    devices:
+      - ${APC_USB:-/dev/null} # USB device for the connected UPS. Set APC_USB to your device path on masters (e.g. /dev/usb/hiddev0). Defaults to /dev/null on slaves.
+    ports:
+      - ${HOST_PORT:-3551}:3551 # Use the standard apcupsd port number of 3551, or optionally change it if it's in use on your Docker host. Default=3551.
+    environment:
+      - APCUPSD_COMPOSE=2026.06.01 # Do not change this value.
+      # ── Identity ────────────────────────────────────────────────────────────
+      - UPSNAME=${UPSNAME} # Sets a name for the UPS (1 to 8 chars), that will be used by System Tray notifications, apcupsd-cgi and Grafana dashboards.
+      - TZ=${TZ} # Timezone, e.g. America/Denver.
+      # ── UPS connectivity ────────────────────────────────────────────────────
+      # On slaves set UPSCABLE=ether, UPSTYPE=net, DEVICE=masterhost:3551. No need to modify the devices section.
+      - UPSCABLE=${UPSCABLE:-usb} # Cable type: usb, ether, etc. (default=usb).
+      - UPSTYPE=${UPSTYPE:-usb} # UPS type: usb, net, etc. (default=usb).
+      - DEVICE=${DEVICE} # Leave blank for USB masters. On slaves set to masterhost:3551.
+      # ── Shutdown thresholds ─────────────────────────────────────────────────
+      - POLLTIME=${POLLTIME:-60} # Interval (in seconds) at which apcupsd polls the UPS for status (default=60).
+      - ONBATTERYDELAY=${ONBATTERYDELAY:-6} # Sets the time in seconds from when a power failure is detected until an onbattery event is initiated (default=6).
+      - BATTERYLEVEL=${BATTERYLEVEL:-5} # Sets the daemon to send the poweroff signal when the UPS reports a battery level of x% or less (default=5).
+      - MINUTES=${MINUTES:-5} # Sets the daemon to send the poweroff signal when the UPS has x minutes or less remaining power (default=5).
+      - TIMEOUT=${TIMEOUT:-0} # Sets the daemon to send the poweroff signal when the UPS has been ON battery power for x seconds (default=0).
+      - KILLDELAY=${KILLDELAY:-0} # If non-zero, sets the daemon to attempt to turn the UPS off x seconds after sending a shutdown request (default=0).
+      # ── Maintenance ──────────────────────────────────────────────────────────
+      - BATTDATE=${BATTDATE} # Date of last battery replacement in mm/dd/yy format, e.g. 06/01/26.
+      - SELFTEST=${SELFTEST:-336} # UPS self-test interval in hours, e.g. 336 (2 weeks) (default=336).
+      - EVENTSFILEMAX=${EVENTSFILEMAX:-10} # Sets the maximum size of the events file in kilobytes. 1024 is recommended. (default=10).
+      - UPDATE_SCRIPTS=${UPDATE_SCRIPTS:-true} # Set to true if you'd like all the apcupsd scripts and .conf file to be overwritten with the latest versions (default=true).
+      # ── Multi-UPS monitoring ────────────────────────────────────────────────
+      - APCUPSD_HOSTS=${APCUPSD_HOSTS} # If this is the MASTER, then enter the APCUPSD_HOSTS list here, including this system (space separated).
+      - APCUPSD_NAMES=${APCUPSD_NAMES} # Match the order of this list one-to-one to APCUPSD_HOSTS list, including this system (space separated).
+      # ── Email notifications via Gmail SMTP ──────────────────────────────────
+      - SMTP_GMAIL=${SMTP_GMAIL} # Gmail account (with 2FA enabled) to use for SMTP.
+      - GMAIL_APP_PASSWD=${GMAIL_APP_PASSWD} # App password for apcupsd from Gmail account being used for SMTP.
+      - NOTIFICATION_EMAIL=${NOTIFICATION_EMAIL} # The Email account to receive on/off battery messages and other notifications.
+      - POWER_RESTORED_EMAIL=${POWER_RESTORED_EMAIL} # Set to true if you'd like an Email notification when power is restored after UPS shutdown.
+      # ── Wake-on-LAN via WoLweb ──────────────────────────────────────────────
+      - WOLWEB_HOSTNAMES=${WOLWEB_HOSTNAMES} # Space-separated list of hostnames to send WoL Magic Packets to on startup.
+      - WOLWEB_PATH_BASE=${WOLWEB_PATH_BASE} # Everything after http:// and before the /hostname required to wake a system with WoLweb e.g. raspberrypi6:8089/wolweb/wake.
+      - WOLWEB_DELAY=${WOLWEB_DELAY:-0} # Seconds to delay before sending WoL Magic Packets to WOLWEB_HOSTNAMES (default=0).
+      # ── Proxmox shutdown via API ─────────────────────────────────────────────
+      - PVE_SHUTDOWN_HOSTS=${PVE_SHUTDOWN_HOSTS} # Ordered list of pve hostnames (or IPs) to be used for API shutdown. Used with matching lists of PVE_SHUTDOWN_NODES and PVE_SHUTDOWN_TOKENS.
+      - PVE_SHUTDOWN_NODES=${PVE_SHUTDOWN_NODES} # Ordered list of pve nodes. Used with matching lists of PVE_SHUTDOWN_HOSTS and PVE_SHUTDOWN_TOKENS.
+      - PVE_SHUTDOWN_TOKENS=${PVE_SHUTDOWN_TOKENS} # Ordered list of pve API tokens with secrets in the form <username>@<realm>!<tokenid>=<secret>.
+    healthcheck:
+      test: ["CMD-SHELL", "apcaccess | grep -E 'ONLINE' >> /dev/null"] # Command to check health.
+      interval: ${HC_INTERVAL:-30s} # Interval between health checks. Default=30s.
+      timeout: ${HC_TIMEOUT:-5s} # Timeout for each health check. Default=5s.
+      retries: ${HC_RETRIES:-3} # How many times to retry. Default=3.
+      start_period: ${HC_START_PERIOD:-15s} # Estimated time to boot. Default=15s.
+    volumes:
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket # Required to support host shutdown from the container.
+      - ${HOST_DIR:-/data}/apcupsd:/etc/apcupsd # /etc/apcupsd can be bound to a directory or a docker volume.
+    restart: unless-stopped

@@ -1,17 +1,14 @@
 #!/bin/sh
-#
-# This shell script if placed in /etc/apcupsd
-# will be called by /etc/apcupsd/apccontrol when the UPS
-# goes on batteries.
-# We send an email message to root to notify him.
-#
+# onbattery
+# 2026.06.01
 
 HOSTNAME=`hostname`
 MSG="$HOSTNAME UPS $1 Power Failure!"
-#
+
 (
    echo "$MSG"
    echo " "
    /sbin/apcaccess status
 ) | $APCUPSD_MAIL -s "$MSG" $SYSADMIN
+
 exit 0
