@@ -1,0 +1,79 @@
+#!/bin/bash
+# testshutdown
+# 2026.06.01
+
+# Dry-run connectivity test for the doshutdown sequence.
+# Run via: docker exec apcupsd /etc/apcupsd/testshutdown
+# Results are written to apcupsd.events and printed to stdout.
+
+EVENTS_FILE=/etc/apcupsd/apcupsd.events
+
+log_event() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S %z')  $1" | tee -a $EVENTS_FILE
+}
+
+HOSTS=( $PVE_SHUTDOWN_HOSTS )
+NODES=( $PVE_SHUTDOWN_NODES )
+TOKENS=( $PVE_SHUTDOWN_TOKENS )
+
+errors=0
+
+log_event "testshutdown: Starting dry-run connectivity checks"
+
+# Test Proxmox API for each node using a safe read-only endpoint
+if [ ${#NODES[@]} -eq 0 ]; then
+  log_event "testshutdown: No Proxmox nodes configured (PVE_SHUTDOWN_NODES not set), skipping API checks"
+else
+  for ((i=0;i<${#NODES[@]};i++))
+    do
+      if [ ! -z "${NODES[$i]}" ] && [[ ${#NODES[@]} -eq ${#HOSTS[@]} ]] && [[ ${#NODES[@]} -eq ${#TOKENS[@]} ]]; then
+        host=${HOSTS[$i]}
+        node=${NODES[$i]}
+        token=${TOKENS[$i]}
+      elif [ ! -z "${NODES[$i]}" ] && [[ ${#HOSTS[@]} -eq 1 ]] && [[ ${#TOKENS[@]} -eq 1 ]]; then
+        host=${HOSTS[0]}
+        node=${NODES[$i]}
+        token=${TOKENS[0]}
+      else
+        log_event "testshutdown: ERROR - Array mismatch for index $i, skipping"
+        errors=$((errors + 1))
+        continue
+      fi
+
+      log_event "testshutdown: Testing Proxmox API for node $node via $host"
+      response=$(curl --fail --silent --show-error --max-time 10 \
+        "https://$host:8006/api2/json/nodes/$node/version" \
+        -H "Authorization: PVEAPIToken=$token" \
+        --insecure 2>&1)
+      curl_exit=$?
+      if [ $curl_exit -eq 0 ]; then
+        version=$(echo "$response" | jq -r '.data.version // "unknown"' 2>/dev/null)
+        log_event "testshutdown: OK - $node reachable at $host, PVE version $version, token valid"
+      else
+        log_event "testshutdown: ERROR - $node unreachable at $host (exit $curl_exit): $response"
+        errors=$((errors + 1))
+      fi
+    done
+fi
+
+# Test dbus connectivity using a safe read-only call
+log_event "testshutdown: Testing dbus connectivity"
+dbus-send --system --print-reply --dest=org.freedesktop.login1 \
+  /org/freedesktop/login1 \
+  org.freedesktop.login1.Manager.ListSessions > /dev/null 2>&1
+dbus_exit=$?
+if [ $dbus_exit -eq 0 ]; then
+  log_event "testshutdown: OK - dbus login1 is responding"
+else
+  log_event "testshutdown: ERROR - dbus-send failed (exit $dbus_exit) -- check /var/run/dbus/system_bus_socket binding"
+  errors=$((errors + 1))
+fi
+
+# Summary
+if [ $errors -eq 0 ]; then
+  log_event "testshutdown: All checks passed"
+else
+  log_event "testshutdown: $errors check(s) failed -- review entries above"
+fi
+
+exit $errors

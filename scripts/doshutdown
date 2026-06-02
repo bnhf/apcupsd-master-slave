@@ -1,4 +1,12 @@
 #!/bin/bash
+# doshutdown
+# 2026.06.01
+
+EVENTS_FILE=/etc/apcupsd/apcupsd.events
+
+log_event() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S %z')  $1" >> $EVENTS_FILE
+}
 
 # docker host reboot:
 #dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 "org.freedesktop.login1.Manager.Reboot" boolean:true
@@ -13,17 +21,42 @@ HOSTS=( $PVE_SHUTDOWN_HOSTS )
 NODES=( $PVE_SHUTDOWN_NODES )
 TOKENS=( $PVE_SHUTDOWN_TOKENS )
 
+log_event "doshutdown: Starting Proxmox shutdown sequence for ${#NODES[@]} node(s)"
+
 # send Proxmox API shutdowns to one or more host, node and API token combos:
 for ((i=0;i<${#NODES[@]};i++))
   do
     # if is used when hosts, nodes and tokens contain an equal number of elements
-    if [ ! -z $i ] && [[ ${#NODES[@]} == ${#HOSTS[@]} ]] && [[ ${#NODES[@]} == ${#TOKENS[@]} ]]; then
-      curl "https://${HOSTS[$i]}:8006/api2/extjs/nodes/${NODES[$i]}/status" -H "Authorization: PVEAPIToken=${TOKENS[$i]}" -H "Content-Type: application/x-www-form-urlencoded" --data "command=shutdown" --insecure
+    if [ ! -z "${NODES[$i]}" ] && [[ ${#NODES[@]} -eq ${#HOSTS[@]} ]] && [[ ${#NODES[@]} -eq ${#TOKENS[@]} ]]; then
+      log_event "doshutdown: Attempting shutdown of node ${NODES[$i]} via ${HOSTS[$i]}"
+      response=$(curl --fail --silent --show-error --max-time 10 \
+        "https://${HOSTS[$i]}:8006/api2/json/nodes/${NODES[$i]}/status" \
+        -H "Authorization: PVEAPIToken=${TOKENS[$i]}" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data "command=shutdown" --insecure 2>&1)
+      curl_exit=$?
+      if [ $curl_exit -eq 0 ]; then
+        log_event "doshutdown: Shutdown accepted for ${NODES[$i]}: $response"
+      else
+        log_event "doshutdown: ERROR - Shutdown failed for ${NODES[$i]} (exit $curl_exit): $response"
+      fi
     # elif is used if there's a single value in hosts and tokens
-    elif [ ! -z $i ] && [[ ${#HOSTS[@]} == 1 ]] && [[ ${#TOKENS[@]} == 1 ]]; then
-      curl "https://$HOSTS:8006/api2/extjs/nodes/${NODES[$i]}/status" -H "Authorization: PVEAPIToken=$TOKENS" -H "Content-Type: application/x-www-form-urlencoded" --data "command=shutdown" --insecure
+    elif [ ! -z "${NODES[$i]}" ] && [[ ${#HOSTS[@]} -eq 1 ]] && [[ ${#TOKENS[@]} -eq 1 ]]; then
+      log_event "doshutdown: Attempting shutdown of node ${NODES[$i]} via ${HOSTS[0]}"
+      response=$(curl --fail --silent --show-error --max-time 10 \
+        "https://${HOSTS[0]}:8006/api2/json/nodes/${NODES[$i]}/status" \
+        -H "Authorization: PVEAPIToken=${TOKENS[0]}" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data "command=shutdown" --insecure 2>&1)
+      curl_exit=$?
+      if [ $curl_exit -eq 0 ]; then
+        log_event "doshutdown: Shutdown accepted for ${NODES[$i]}: $response"
+      else
+        log_event "doshutdown: ERROR - Shutdown failed for ${NODES[$i]} (exit $curl_exit): $response"
+      fi
     # else is used if hosts, nodes and tokens don't meet either of the above tests
     else
+      log_event "doshutdown: ERROR - Array mismatch, no Proxmox shutdown performed for index $i"
       echo "No Proxmox API shutdown(s) performed"
     fi
   done
@@ -39,7 +72,12 @@ MSG="$HOSTNAME UPS $UPSNAME initiated Shutdown Sequence"
 ) | $APCUPSD_MAIL -s "$MSG" $SYSADMIN
 
 # docker host shutdown:
+log_event "doshutdown: Initiating host shutdown via dbus"
 dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 "org.freedesktop.login1.Manager.PowerOff" boolean:true
+dbus_exit=$?
+if [ $dbus_exit -ne 0 ]; then
+  log_event "doshutdown: ERROR - dbus-send PowerOff failed (exit $dbus_exit)"
+fi
 
 # docker host shutdown consolekit environment:
 #dbus-send --system --print-reply --dest="org.freedesktop.ConsoleKit" /org/freedesktop/ConsoleKit/Manager org.freedesktop.ConsoleKit.Manager.PowerOff boolean:true
