@@ -19,7 +19,7 @@ log_event "start.sh: Container starting"
 cp /opt/apcupsd/apcupsd /etc/default/apcupsd
 
 # Check if /etc/apcupsd files exist, and copy them from /opt/apcupsd if they don't
-files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown )
+files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown testemail )
 
 for i in "${files[@]}"
   do

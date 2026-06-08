@@ -11,8 +11,10 @@ ENV APCUPSD_VERSION=${BUILD_DATE:-unknown}
 
 RUN echo Starting. \
  && apt-get -q -y update \
- && apt-get -q -y install --no-install-recommends apcupsd bash dbus libapparmor1 libdbus-1-3 libexpat1 tzdata \
- && apt-get -q -y install --no-install-recommends postfix libsasl2-modules mailutils curl jq iputils-ping ca-certificates ssl-cert \
+ && apt-get -q -y install --no-install-recommends \
+      apcupsd bash ca-certificates curl dbus iputils-ping jq \
+      libapparmor1 libdbus-1-3 libexpat1 libsasl2-modules \
+      mailutils postfix procps ssl-cert tzdata \
  && apt-get -q -y full-upgrade \
  && rm -rif /var/lib/apt/lists/* \
  && mkdir /opt/apcupsd \
