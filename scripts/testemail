@@ -1,0 +1,73 @@
+#!/bin/bash
+# testemail
+# 2026.06.01
+
+# Email configuration test -- sends a real test email and validates the full chain.
+# Run via: docker exec apcupsd /etc/apcupsd/testemail
+# Results are written to apcupsd.events and printed to stdout.
+
+EVENTS_FILE=/etc/apcupsd/apcupsd.events
+
+log_event() {
+  echo "$(date '+%Y-%m-%d %H:%M:%S %z')  $1" | tee -a $EVENTS_FILE
+}
+
+errors=0
+
+log_event "testemail: Starting email configuration check"
+
+# Check Postfix is running
+if service postfix status > /dev/null 2>&1; then
+  log_event "testemail: OK - Postfix is running"
+else
+  log_event "testemail: ERROR - Postfix is not running -- check startup logs for errors"
+  errors=$((errors + 1))
+fi
+
+# Check SMTP credentials have been configured
+if [ -f /etc/postfix/sasl_passwd.db ]; then
+  log_event "testemail: OK - SMTP credentials file exists"
+else
+  log_event "testemail: ERROR - sasl_passwd.db not found -- check SMTP_GMAIL and GMAIL_APP_PASSWD env vars"
+  errors=$((errors + 1))
+fi
+
+# Check notification email is set
+if [ ! -z "$NOTIFICATION_EMAIL" ]; then
+  log_event "testemail: OK - NOTIFICATION_EMAIL is set to $NOTIFICATION_EMAIL"
+else
+  log_event "testemail: ERROR - NOTIFICATION_EMAIL is not set"
+  errors=$((errors + 1))
+fi
+
+# Send test email if all checks passed
+if [ $errors -eq 0 ]; then
+  log_event "testemail: Sending test email to $NOTIFICATION_EMAIL"
+  send_result=$(echo "This is a test email from apcupsd on $(hostname). Sent at $(date)." | \
+    mail -s "apcupsd Test Email from $(hostname)" $NOTIFICATION_EMAIL 2>&1)
+  send_exit=$?
+  if [ $send_exit -eq 0 ]; then
+    log_event "testemail: OK - Test email queued for delivery"
+    sleep 5
+    queue=$(mailq 2>/dev/null)
+    if echo "$queue" | grep -q "Mail queue is empty"; then
+      log_event "testemail: OK - Mail queue is empty -- email delivered successfully"
+    else
+      queued=$(echo "$queue" | grep -c "^[0-9A-F]")
+      log_event "testemail: WARNING - $queued item(s) remain in mail queue -- Postfix may not have reached Gmail (check credentials or TLS)"
+      errors=$((errors + 1))
+    fi
+  else
+    log_event "testemail: ERROR - Failed to queue email (exit $send_exit): $send_result"
+    errors=$((errors + 1))
+  fi
+fi
+
+# Summary
+if [ $errors -eq 0 ]; then
+  log_event "testemail: All checks passed -- check $NOTIFICATION_EMAIL for the test message"
+else
+  log_event "testemail: $errors check(s) failed -- review entries above"
+fi
+
+exit $errors
