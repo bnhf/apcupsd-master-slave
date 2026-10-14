@@ -1,0 +1,20 @@
+[Unit]
+Description=Delay boot after a UPS power-failure shutdown so the LAN can start first
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+RequiresMountsFor=/data/apcupsd
+# Only run after a power-failure shutdown. This is the host path of apcupsd's powerfail flag --
+# edit it if your HOST_DIR isn't /data.
+ConditionPathExists=/data/apcupsd/powerfail
+
+[Service]
+Type=oneshot
+# Stay active after finishing so the apcupsd container can read this boot's result over dbus
+RemainAfterExit=yes
+# Fixed delay before networking, Docker and most other services start
+ExecStart=/bin/sleep 60
+TimeoutStartSec=90
+
+[Install]
+WantedBy=sysinit.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=Hold Docker after a UPS power-failure shutdown until DNS and time are ready
+After=network.target
+Before=docker.service
+# Only run after a power-failure shutdown. This is the host path of apcupsd's powerfail flag --
+# edit it if your HOST_DIR isn't /data.
+ConditionPathExists=/data/apcupsd/powerfail
+
+[Service]
+Type=oneshot
+# Stay active after finishing so the apcupsd container can read this boot's result over dbus
+RemainAfterExit=yes
+# Wait up to 2 minutes for DNS and NTP sync; the leading - lets Docker start even if we time out
+ExecStart=-/usr/bin/timeout 120 /bin/sh -c 'until getent hosts pool.ntp.org >/dev/null && timedatectl show -p NTPSynchronized --value | grep -qx yes; do sleep 5; done'
+TimeoutStartSec=150
+
+[Install]
+WantedBy=docker.service
