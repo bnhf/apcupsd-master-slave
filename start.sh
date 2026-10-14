@@ -1,6 +1,6 @@
 #!/bin/bash
 # start.sh
-# 2026.06.01
+# 2026.10.14
 
 EVENTS_FILE=/etc/apcupsd/apcupsd.events
 LATEST_COMPOSE=2026.06.01
@@ -19,7 +19,7 @@ log_event "start.sh: Container starting"
 cp /opt/apcupsd/apcupsd /etc/default/apcupsd
 
 # Check if /etc/apcupsd files exist, and copy them from /opt/apcupsd if they don't
-files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown testemail )
+files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown testemail power-restore-delay.service power-restore-wait.service install-power-restore )
 
 for i in "${files[@]}"
   do
@@ -30,6 +30,98 @@ for i in "${files[@]}"
       log_event "start.sh: Using existing $i"
     fi
   done
+
+chmod +x /etc/apcupsd/install-power-restore
+
+# Read one property of a host systemd unit over dbus, as dbus-send prints it (empty if the bus isn't reachable)
+unitPropertyRaw() {
+  local unitPath=$(printf '%s' "$1" | sed 's/-/_2d/g; s/\./_2e/g')
+  dbus-send --system --print-reply=literal --dest=org.freedesktop.systemd1 \
+    "/org/freedesktop/systemd1/unit/$unitPath" \
+    org.freedesktop.DBus.Properties.Get "string:org.freedesktop.systemd1.$2" "string:$3" 2>/dev/null
+}
+
+# Read one simple (string, number or boolean) property of a host systemd unit
+unitProperty() {
+  unitPropertyRaw "$@" | awk '{ print $NF }'
+}
+
+# Log whether the host's power-restore units are installed, and the settings in the installed copies
+logRestoreUnitSettings() {
+  local unit name loadState delay timeout paths
+  for unit in power-restore-delay.service power-restore-wait.service; do
+    name=${unit%.service}
+    loadState=$(unitProperty "$unit" Unit LoadState)
+    if [ -z "$loadState" ]; then
+      log_event "start.sh: Unable to query host systemd via dbus -- power-restore unit status unavailable"
+      return
+    fi
+    if [ "$loadState" != "loaded" ]; then
+      log_event "start.sh: $name: not installed on this host -- see README (Power Restore Delay and Wait)"
+      continue
+    fi
+    if [ "$(unitProperty "$unit" Unit UnitFileState)" != "enabled" ]; then
+      log_event "start.sh: $name: installed but not enabled -- run: sudo systemctl enable $unit"
+      continue
+    fi
+
+    # The delay/limit is the first number in the ExecStart command line (sleep 60, timeout 120)
+    delay=$(unitPropertyRaw "$unit" Service ExecStart | awk '
+      /array \[/ { arrays++ }
+      arrays >= 2 { for (i = 1; i <= NF; i++) { if ($i == "]") exit; if ($i ~ /^[0-9]+[smhd]?$/) { print $i; exit } } }')
+    [[ $delay =~ ^[0-9]+$ ]] && delay="${delay}s"
+    timeout=$(unitProperty "$unit" Service TimeoutStartUSec)
+    [[ $timeout =~ ^[0-9]{1,15}$ ]] && timeout="$((timeout / 1000000))s" || timeout="none"
+    paths=$(unitPropertyRaw "$unit" Unit Conditions | awk '
+      { for (i = 1; i <= NF; i++) tok[++n] = $i }
+      END { for (i = 1; i <= n; i++) if (tok[i] == "ConditionPathExists") printf "%s%s", (found++ ? " or " : ""), tok[i + 5] }')
+
+    if [ "$name" == "power-restore-delay" ]; then
+      log_event "start.sh: $name: enabled -- boot delay ${delay:-unknown} (start timeout $timeout), runs if ${paths:-(no path condition)} exists"
+    else
+      log_event "start.sh: $name: enabled -- Docker wait up to ${delay:-unknown} (start timeout $timeout), runs if ${paths:-(no path condition)} exists"
+    fi
+    if [ "$(unitProperty "$unit" Service RemainAfterExit)" != "true" ]; then
+      log_event "start.sh: $name: RemainAfterExit not set -- results can't be logged; copy the current unit from /etc/apcupsd"
+    fi
+  done
+}
+
+# Log what the host's power-restore-delay and power-restore-wait units did during this boot
+logRestoreUnits() {
+  local unit name started finished status secs
+  for unit in power-restore-delay.service power-restore-wait.service; do
+    name=${unit%.service}
+    # Not installed, not enabled or no dbus -- already reported by logRestoreUnitSettings
+    [ "$(unitProperty "$unit" Unit LoadState)" == "loaded" ] || continue
+    [ "$(unitProperty "$unit" Unit UnitFileState)" == "enabled" ] || continue
+    if [ "$(unitProperty "$unit" Unit ConditionTimestampMonotonic)" == "0" ]; then
+      log_event "start.sh: $name: didn't run this boot (enabled after boot?)"
+      continue
+    fi
+    if [ "$(unitProperty "$unit" Unit ConditionResult)" != "true" ]; then
+      log_event "start.sh: $name: skipped this boot -- check its ConditionPathExists matches the host path of powerfail"
+      continue
+    fi
+    started=$(unitProperty "$unit" Service ExecMainStartTimestampMonotonic)
+    finished=$(unitProperty "$unit" Service ExecMainExitTimestampMonotonic)
+    status=$(unitProperty "$unit" Service ExecMainStatus)
+    if [[ ! $started =~ ^[0-9]+$ ]] || [[ ! $finished =~ ^[0-9]+$ ]] || (( finished < started )); then
+      log_event "start.sh: $name: ran this boot, duration unavailable"
+      continue
+    fi
+    secs=$(( (finished - started) / 1000000 ))
+    if [ "$name" == "power-restore-delay" ]; then
+      log_event "start.sh: $name: held boot for ${secs}s"
+    elif [ "$status" == "124" ]; then
+      log_event "start.sh: $name: timed out after ${secs}s -- DNS or clock still not ready"
+    else
+      log_event "start.sh: $name: held Docker for ${secs}s -- DNS and clock ready"
+    fi
+  done
+}
+
+logRestoreUnitSettings
 
 # First, if not previously done, add an extra # to the second UPSNAME used for EPROM updates
 sed -i 's/^#UPSNAME UPS_IDEN/##UPSNAME UPS_IDEN/' /etc/apcupsd/apcupsd.conf
@@ -125,6 +217,7 @@ fi
 # capture power failure state before prestart removes the flag
 POWER_FAILURE_RESTART=false
 [ -f /etc/apcupsd/powerfail ] && POWER_FAILURE_RESTART=true
+[ "$POWER_FAILURE_RESTART" == "true" ] && logRestoreUnits
 
 # send notification email on startup after power failure based shutdown
 if [ "$POWER_FAILURE_RESTART" == "true" ] && [[ $POWER_RESTORED_EMAIL == "true" ]]; then

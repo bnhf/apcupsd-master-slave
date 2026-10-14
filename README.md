@@ -273,3 +273,102 @@ PVE_SHUTDOWN_TOKENS=shutdown@pve!token1=secret1 shutdown@pve!token2=secret2
 ```
 
 Run `docker exec apcupsd /etc/apcupsd/testshutdown` after deployment to confirm API reachability and token validity before relying on it during a real power event.
+
+## *Power Restore Delay and Wait (optional host services):*
+
+After a power failure, the whole LAN restarts at once. A Raspberry Pi often finishes booting before the network (gateway, DNS, Internet) is answering. When that happens, Docker can start its containers before the host has any DNS servers, and they stay without DNS until they're restarted. The result is undelivered power-restored emails and failed WoL wakes, and it affects every container on the host.
+
+apcupsd-master-slave includes two small systemd units for the Docker host that fix this. Both only run when apcupsd's `powerfail` flag is present (i.e. after a UPS power-failure shutdown) -- on a normal boot they do nothing.
+
+| Unit | What it does | Maximum wait |
+|---|---|---|
+| `power-restore-delay.service` | Pauses the boot early, before networking, Docker and most other services start, giving the LAN a head start | 60 seconds (fixed) |
+| `power-restore-wait.service` | Holds Docker until DNS resolves `pool.ntp.org` and the host clock has synced, then lets it start | 120 seconds |
+
+apcupsd isn't monitoring the UPS while these units wait, so the total delay is capped at about 3 minutes.
+
+The container copies both units, and the `install-power-restore` script that installs them, to your persistent directory (e.g. `/data/apcupsd/`) on every start.
+
+### *Compatibility:*
+
+The units require systemd 239 or later, Docker running as `docker.service`, and an NTP client that reports sync status to the kernel (systemd-timesyncd, chrony or ntpd).
+
+| Distribution | Supported releases |
+|---|---|
+| Raspberry Pi OS | Buster (10), Bullseye (11), Bookworm (12), Trixie (13) |
+| Debian | 10 (Buster) and later |
+| Ubuntu | 20.04 LTS and later |
+
+Not supported: Ubuntu 18.04 (systemd 237), Docker installed as a snap (its service is `snap.docker.dockerd`, not `docker.service`), and hosts without systemd (e.g. Alpine, Unraid).
+
+The units have the same names as the ones shipped with [nut-plus](https://github.com/bnhf/nut-plus), so install only one project's copies on a given host.
+
+### *Install:*
+
+Run the script on the Docker host (not inside the container), from your persistent directory:
+
+```bash
+sudo /data/apcupsd/install-power-restore
+```
+
+It prompts for the two values -- press Enter to keep the value shown in brackets:
+
+```
+Boot delay in seconds (fixed pause before networking starts) [60]:
+Docker wait limit in seconds (until DNS and the clock are ready) [120]:
+```
+
+Each value can be 0 to 600 seconds, and 0 turns that unit off. The script works out the `powerfail` path from its own location, so it's correct whatever your `HOST_DIR` is, then installs and enables the units and checks them with `systemd-analyze verify`. Run it again at any time to change the values -- the prompts show the installed values. The new values take effect on the next power-failure boot.
+
+To set the values without prompts (e.g. when setting up several hosts the same way):
+
+```bash
+sudo /data/apcupsd/install-power-restore --delay 60 --wait 120
+```
+
+The script checks that it's running as root on the host, that systemd is 239 or later, and that Docker runs as `docker.service`. `--help` lists all options.
+
+To check the installation without rebooting:
+
+```bash
+systemctl is-enabled power-restore-delay.service power-restore-wait.service
+sudo systemd-analyze verify /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service
+```
+
+Don't test by creating a `powerfail` file by hand on a production host -- the container treats it as a real power-failure restart and sends the power-restored email and WoL wakes.
+
+On every start, the container logs whether each unit is installed and enabled, and the settings in the installed copies (times and `ConditionPathExists` path), to `apcupsd.events`, for example:
+
+```
+2026-10-13 12:59:27 -0600  start.sh: power-restore-delay: enabled -- boot delay 60s (start timeout 90s), runs if /data/apcupsd/powerfail exists
+2026-10-13 12:59:27 -0600  start.sh: power-restore-wait: enabled -- Docker wait up to 120s (start timeout 150s), runs if /data/apcupsd/powerfail exists
+```
+
+After a power failure, it also reads each unit's result from the host's systemd (via the dbus socket it already mounts) and logs it, for example:
+
+```
+2026-10-13 13:29:59 -0600  start.sh: power-restore-delay: held boot for 60s
+2026-10-13 13:29:59 -0600  start.sh: power-restore-wait: held Docker for 30s -- DNS and clock ready
+```
+
+It also logs when a unit isn't installed, isn't enabled, was skipped (usually a `ConditionPathExists` path that doesn't match your `HOST_DIR`), or timed out. On the host itself, this shows the same boot's details:
+
+```bash
+journalctl -b -u power-restore-delay -u power-restore-wait -o short-precise --no-pager
+```
+
+On Raspberry Pi OS the system journal is kept in memory by default, so it's lost on reboot. To keep it across reboots (capped at 50 MB):
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d /var/log/journal
+printf '[Journal]\nStorage=persistent\nSystemMaxUse=50M\n' | sudo tee /etc/systemd/journald.conf.d/50-persistent.conf
+sudo systemctl restart systemd-journald
+```
+
+### *Remove:*
+
+```bash
+sudo /data/apcupsd/install-power-restore --remove
+```
+
+It asks for confirmation first (add `--yes` to skip it), then disables and deletes both units. `systemctl status power-restore-delay power-restore-wait` should then report both units as not found.
