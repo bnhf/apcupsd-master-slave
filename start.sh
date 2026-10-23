@@ -1,9 +1,10 @@
 #!/bin/bash
 # start.sh
-# 2026.10.14
+# 2026.10.22
 
 EVENTS_FILE=/etc/apcupsd/apcupsd.events
-LATEST_COMPOSE=2026.06.01
+MARKER_FILE=/etc/apcupsd/shutdown-marker
+LATEST_COMPOSE=2026.10.21
 
 log_event() {
   echo "$(date '+%Y-%m-%d %H:%M:%S %z')  $1" | tee -a $EVENTS_FILE
@@ -19,7 +20,7 @@ log_event "start.sh: Container starting"
 cp /opt/apcupsd/apcupsd /etc/default/apcupsd
 
 # Check if /etc/apcupsd files exist, and copy them from /opt/apcupsd if they don't
-files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown testemail power-restore-delay.service power-restore-wait.service install-power-restore )
+files=( apcupsd.conf hosts.conf doshutdown apccontrol changeme commfailure commok killpower multimon.conf offbattery onbattery ups-monitor testshutdown testemail power-restore-delay.service power-restore-wait.service power-shutdown-marker.service install-power-restore )
 
 for i in "${files[@]}"
   do
@@ -57,7 +58,7 @@ logRestoreUnitSettings() {
       return
     fi
     if [ "$loadState" != "loaded" ]; then
-      log_event "start.sh: $name: not installed on this host -- see README (Power Restore Delay and Wait)"
+      log_event "start.sh: $name: not installed (optional, not needed for UPS shutdown) -- see README (Power Restore Delay and Wait)"
       continue
     fi
     if [ "$(unitProperty "$unit" Unit UnitFileState)" != "enabled" ]; then
@@ -121,7 +122,32 @@ logRestoreUnits() {
   done
 }
 
+# Log whether the host's shutdown marker unit is installed (no dbus message -- logRestoreUnitSettings reports that)
+logMarkerUnitSetting() {
+  local loadState=$(unitProperty power-shutdown-marker.service Unit LoadState)
+  [ -z "$loadState" ] && return
+  if [ "$loadState" != "loaded" ]; then
+    log_event "start.sh: power-shutdown-marker: not installed (optional, not needed for UPS shutdown) -- see README (Power Restore Delay and Wait)"
+  elif [ "$(unitProperty power-shutdown-marker.service Unit UnitFileState)" != "enabled" ]; then
+    log_event "start.sh: power-shutdown-marker: installed but not enabled -- run: sudo systemctl enable power-shutdown-marker.service"
+  elif [ "$(unitProperty power-shutdown-marker.service Unit ActiveState)" != "active" ]; then
+    log_event "start.sh: power-shutdown-marker: enabled but not running, so it won't record a shutdown -- run: sudo systemctl start power-shutdown-marker.service"
+  else
+    log_event "start.sh: power-shutdown-marker: enabled -- records when a power-failure shutdown gets past Docker"
+  fi
+}
+
+# Log whether the last power-failure shutdown got past Docker before the UPS cut power
+logShutdownMarker() {
+  if [ -f $MARKER_FILE ]; then
+    log_event "start.sh: power-shutdown-marker: host got past Docker at $(cat $MARKER_FILE) -- shutdown reached its final stage"
+  elif [ "$(unitProperty power-shutdown-marker.service Unit UnitFileState)" == "enabled" ]; then
+    log_event "start.sh: WARNING -- power-shutdown-marker: no marker from the power-failure shutdown -- the UPS cut power before the host finished stopping Docker, or the unit wasn't running then (installed without a reboot or start)"
+  fi
+}
+
 logRestoreUnitSettings
+logMarkerUnitSetting
 
 # First, if not previously done, add an extra # to the second UPSNAME used for EPROM updates
 sed -i 's/^#UPSNAME UPS_IDEN/##UPSNAME UPS_IDEN/' /etc/apcupsd/apcupsd.conf
@@ -218,6 +244,8 @@ fi
 POWER_FAILURE_RESTART=false
 [ -f /etc/apcupsd/powerfail ] && POWER_FAILURE_RESTART=true
 [ "$POWER_FAILURE_RESTART" == "true" ] && logRestoreUnits
+[ "$POWER_FAILURE_RESTART" == "true" ] && logShutdownMarker
+rm -f $MARKER_FILE
 
 # send notification email on startup after power failure based shutdown
 if [ "$POWER_FAILURE_RESTART" == "true" ] && [[ $POWER_RESTORED_EMAIL == "true" ]]; then
@@ -249,5 +277,31 @@ else
 fi
 log_event "start.sh: Currently running bnhf/apcupsd version $APCUPSD_VERSION"
 
-# keep container alive and surface events log via docker logs
-exec tail -n 0 -f $EVENTS_FILE
+# On a power-failure shutdown, turn the UPS off when Docker stops the container -- unless this is a slave.
+# This is done whatever KILLDELAY is: the daemon dies with this script, so it can't be relied on to do it.
+onStop() {
+  local upsType output status
+  if [ -f /etc/apcupsd/powerfail ]; then
+    upsType=$(awk '$1 == "UPSTYPE" { print $2 }' /etc/apcupsd/apcupsd.conf)
+    if [ "$upsType" == "net" ]; then
+      log_event "start.sh: Power-failure shutdown -- slave, leaving UPS power-off to the master"
+    else
+      log_event "start.sh: Power-failure shutdown -- stopping apcupsd daemon and sending killpower to the UPS"
+      pkill -x apcupsd
+      for i in {1..6}; do pgrep -x apcupsd > /dev/null || break; sleep 0.5; done
+      # killpower and the next start both need the flag
+      touch /etc/apcupsd/powerfail
+      output=$(/sbin/apcupsd --killpower 2>&1)
+      status=$?
+      log_event "start.sh: apcupsd --killpower finished (exit $status)${output:+: $(echo $output)}"
+    fi
+  fi
+  kill $tailPid 2> /dev/null
+  exit 0
+}
+
+# keep container alive and surface events log via docker logs, until Docker stops the container
+tail -n 0 -f $EVENTS_FILE &
+tailPid=$!
+trap onStop TERM INT
+wait $tailPid

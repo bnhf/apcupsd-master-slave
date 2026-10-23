@@ -1,6 +1,6 @@
 services:
   apcupsd: # This docker-compose typically requires no editing. Use the Environment variables section of Portainer to set your values.
-    # 2026.06.01
+    # 2026.10.21
     # GitHub home for this project: https://github.com/bnhf/apcupsd-admin-plus.
     # Docker container home for this project with setup instructions: https://hub.docker.com/r/bnhf/apcupsd.
     image: bnhf/apcupsd:${TAG:-latest} # Add the tag like latest or test to the environment variables below.
@@ -12,7 +12,7 @@ services:
     ports:
       - ${HOST_PORT:-3551}:3551 # Use the standard apcupsd port number of 3551, or optionally change it if it's in use on your Docker host. Default=3551.
     environment:
-      - APCUPSD_COMPOSE=2026.06.01 # Do not change this value.
+      - APCUPSD_COMPOSE=2026.10.21 # Do not change this value.
       # ── Identity ────────────────────────────────────────────────────────────
       - UPSNAME=${UPSNAME} # Sets a name for the UPS (1 to 8 chars), that will be used by System Tray notifications, apcupsd-cgi and Grafana dashboards.
       - TZ=${TZ} # Timezone, e.g. America/Denver.
@@ -58,4 +58,6 @@ services:
     volumes:
       - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket # Required to support host shutdown from the container.
       - ${HOST_DIR:-/data}/apcupsd:/etc/apcupsd # /etc/apcupsd can be bound to a directory or a docker volume.
+    security_opt:
+      - apparmor=${APPARMOR_PROFILE:-docker-default} # Docker's default AppArmor profile. If testshutdown logs that AppArmor blocked dbus, set APPARMOR_PROFILE=unconfined in Portainer's env var override area.
     restart: unless-stopped

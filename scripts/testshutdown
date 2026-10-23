@@ -1,6 +1,6 @@
 #!/bin/bash
 # testshutdown
-# 2026.06.01
+# 2026.10.21
 
 # Dry-run connectivity test for the doshutdown sequence.
 # Run via: docker exec apcupsd /etc/apcupsd/testshutdown
@@ -58,14 +58,22 @@ fi
 
 # Test dbus connectivity using a safe read-only call
 log_event "testshutdown: Testing dbus connectivity"
-dbus-send --system --print-reply --dest=org.freedesktop.login1 \
+dbus_error=$(dbus-send --system --print-reply --dest=org.freedesktop.login1 \
   /org/freedesktop/login1 \
-  org.freedesktop.login1.Manager.ListSessions > /dev/null 2>&1
+  org.freedesktop.login1.Manager.ListSessions 2>&1 > /dev/null)
 dbus_exit=$?
 if [ $dbus_exit -eq 0 ]; then
   log_event "testshutdown: OK - dbus login1 is responding"
+elif [ ! -S /var/run/dbus/system_bus_socket ]; then
+  log_event "testshutdown: ERROR - /var/run/dbus/system_bus_socket isn't mounted -- check the volumes section of the compose"
+  errors=$((errors + 1))
+elif [[ $dbus_error == *"AppArmor policy prevents"* ]]; then
+  # The container's AppArmor profile, e.g. "docker-default (enforce)"
+  profile=$(cat /proc/self/attr/apparmor/current 2>/dev/null || cat /proc/self/attr/current 2>/dev/null)
+  log_event "testshutdown: ERROR - the host's AppArmor blocked dbus (container profile: ${profile:-unknown}) -- set APPARMOR_PROFILE=unconfined in the compose environment variables"
+  errors=$((errors + 1))
 else
-  log_event "testshutdown: ERROR - dbus-send failed (exit $dbus_exit) -- check /var/run/dbus/system_bus_socket binding"
+  log_event "testshutdown: ERROR - dbus-send failed (exit $dbus_exit): ${dbus_error:-no error output}"
   errors=$((errors + 1))
 fi
 

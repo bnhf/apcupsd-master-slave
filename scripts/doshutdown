@@ -1,6 +1,6 @@
 #!/bin/bash
 # doshutdown
-# 2026.06.01
+# 2026.10.22
 
 EVENTS_FILE=/etc/apcupsd/apcupsd.events
 
@@ -13,6 +13,18 @@ log_event() {
 
 # docker host reboot consolekit environmet:
 #dbus-send --system --print-reply --dest="org.freedesktop.ConsoleKit" /org/freedesktop/ConsoleKit/Manager org.freedesktop.ConsoleKit.Manager.Restart boolean:true
+
+# send Email confirming shutdown -- first, so Postfix delivers it while the Proxmox shutdowns run
+HOSTNAME=`hostname`
+MSG="$HOSTNAME UPS $UPSNAME initiated Shutdown Sequence"
+#
+(
+   echo "$MSG"
+   echo " "
+   /sbin/apcaccess status
+) | $APCUPSD_MAIL -s "$MSG" $SYSADMIN
+mail_start=$SECONDS
+postqueue -f > /dev/null 2>&1
 
 # Proxmox shutdown of one or more hosts via PVE API:
 
@@ -61,15 +73,19 @@ for ((i=0;i<${#NODES[@]};i++))
     fi
   done
 
-# send Email confirming shutdown
-HOSTNAME=`hostname`
-MSG="$HOSTNAME UPS $UPSNAME initiated Shutdown Sequence"
-#
-(
-   echo "$MSG"
-   echo " "
-   /sbin/apcaccess status
-) | $APCUPSD_MAIL -s "$MSG" $SYSADMIN
+# Postfix dies with the container once the host shuts down, so give the email up to MAIL_WAIT seconds
+# (counted from when it was queued) to get out
+MAIL_WAIT=8
+if [ ! -z "$NOTIFICATION_EMAIL" ]; then
+  until mailq 2>/dev/null | grep -q "Mail queue is empty"; do
+    if (( SECONDS - mail_start >= MAIL_WAIT )); then
+      log_event "doshutdown: WARNING - Shutdown email still queued after ${MAIL_WAIT}s -- continuing shutdown"
+      break
+    fi
+    sleep 0.5
+  done
+  mailq 2>/dev/null | grep -q "Mail queue is empty" && log_event "doshutdown: Shutdown email sent"
+fi
 
 # docker host shutdown:
 log_event "doshutdown: Initiating host shutdown via dbus"
