@@ -1,0 +1,18 @@
+[Unit]
+Description=Record when the host gets past Docker during a UPS power-failure shutdown
+After=local-fs.target
+Before=docker.service
+RequiresMountsFor=/data/apcupsd
+
+[Service]
+Type=oneshot
+# Stay active so ExecStop runs at shutdown -- after Docker stops, before /data/apcupsd is unmounted
+RemainAfterExit=yes
+ExecStart=/bin/true
+# Writes the time to shutdown-marker if apcupsd's powerfail flag is present. The apcupsd container logs and
+# removes the marker on its next start. These are the host paths of the flag --
+# edit it if your HOST_DIR isn't /data.
+ExecStop=/bin/sh -c 'if [ -f /data/apcupsd/powerfail ]; then date "+%%Y-%%m-%%d %%H:%%M:%%S %%z" > /data/apcupsd/shutdown-marker && sync; fi'
+
+[Install]
+WantedBy=multi-user.target

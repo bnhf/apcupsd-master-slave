@@ -52,7 +52,7 @@ services:
 ```yml
 services:
   apcupsd: # This docker-compose typically requires no editing. Use the Environment variables section of Portainer to set your values.
-    # 2026.06.01
+    # 2026.10.21
     # GitHub home for this project: https://github.com/bnhf/apcupsd-admin-plus.
     # Docker container home for this project with setup instructions: https://hub.docker.com/r/bnhf/apcupsd.
     image: bnhf/apcupsd:${TAG:-latest} # Add the tag like latest or test to the environment variables below.
@@ -64,7 +64,7 @@ services:
     ports:
       - ${HOST_PORT:-3551}:3551 # Use the standard apcupsd port number of 3551, or optionally change it if it's in use on your Docker host. Default=3551.
     environment:
-      - APCUPSD_COMPOSE=2026.06.01 # Do not change this value.
+      - APCUPSD_COMPOSE=2026.10.21 # Do not change this value.
       # ── Identity ────────────────────────────────────────────────────────────
       - UPSNAME=${UPSNAME} # Sets a name for the UPS (1 to 8 chars), that will be used by System Tray notifications, apcupsd-cgi and Grafana dashboards.
       - TZ=${TZ} # Timezone, e.g. America/Denver.
@@ -110,6 +110,8 @@ services:
     volumes:
       - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket # Required to support host shutdown from the container.
       - ${HOST_DIR:-/data}/apcupsd:/etc/apcupsd # /etc/apcupsd can be bound to a directory or a docker volume.
+    security_opt:
+      - apparmor=${APPARMOR_PROFILE:-docker-default} # Docker's default AppArmor profile. If testshutdown logs that AppArmor blocked dbus, set APPARMOR_PROFILE=unconfined in Portainer's env var override area.
     restart: unless-stopped
 
 # If you prefer to use Docker Volumes instead of directory bindings, uncomment below as required.
@@ -156,6 +158,7 @@ WOLWEB_DELAY=30
 PVE_SHUTDOWN_HOSTS=pve1 pve2
 PVE_SHUTDOWN_NODES=pve1 pve2
 PVE_SHUTDOWN_TOKENS=shutdown@pve!token1=secret1 shutdown@pve!token2=secret2
+APPARMOR_PROFILE=docker-default
 ```
 
 ### *Validating connectivity before a real power event:*
@@ -274,20 +277,38 @@ PVE_SHUTDOWN_TOKENS=shutdown@pve!token1=secret1 shutdown@pve!token2=secret2
 
 Run `docker exec apcupsd /etc/apcupsd/testshutdown` after deployment to confirm API reachability and token validity before relying on it during a real power event.
 
+## *UPS Power-Off:*
+
+After a power-failure shutdown, the UPS has to turn its outlets off, so that they come back on, and your systems boot, when mains power returns. On a host install, a late-shutdown script runs `apcupsd --killpower` for this. In the container it's done like this instead:
+
+When Docker stops the container during a power-failure shutdown, the container stops the apcupsd daemon and runs `apcupsd --killpower`. This happens even if mains power came back mid-shutdown, and whatever `KILLDELAY` is set to. Leave `KILLDELAY=0` (the default): the daemon is stopped along with the container, so it can't be relied on to send killpower itself.
+
+The UPS cuts power after its own built-in delay. The host has to finish shutting down within that delay. Slaves (`UPSTYPE=net`) never send killpower.
+
+The result is logged to `apcupsd.events`:
+
+```
+2026-10-20 14:02:11 -0600  start.sh: Power-failure shutdown -- stopping apcupsd daemon and sending killpower to the UPS
+2026-10-20 14:02:13 -0600  start.sh: apcupsd --killpower finished (exit 0)
+```
+
+The optional `power-shutdown-marker.service` (below) also records whether the host got past Docker before the power was cut.
+
 ## *Power Restore Delay and Wait (optional host services):*
 
 After a power failure, the whole LAN restarts at once. A Raspberry Pi often finishes booting before the network (gateway, DNS, Internet) is answering. When that happens, Docker can start its containers before the host has any DNS servers, and they stay without DNS until they're restarted. The result is undelivered power-restored emails and failed WoL wakes, and it affects every container on the host.
 
-apcupsd-master-slave includes two small systemd units for the Docker host that fix this. Both only run when apcupsd's `powerfail` flag is present (i.e. after a UPS power-failure shutdown) -- on a normal boot they do nothing.
+apcupsd-master-slave includes two small systemd units for the Docker host that fix this, plus a third that checks the shutdown itself. All three only act when apcupsd's `powerfail` flag is present (i.e. around a UPS power-failure shutdown) -- otherwise they do nothing.
 
 | Unit | What it does | Maximum wait |
 |---|---|---|
 | `power-restore-delay.service` | Pauses the boot early, before networking, Docker and most other services start, giving the LAN a head start | 60 seconds (fixed) |
 | `power-restore-wait.service` | Holds Docker until DNS resolves `pool.ntp.org` and the host clock has synced, then lets it start | 120 seconds |
+| `power-shutdown-marker.service` | During a power-failure shutdown, writes the time to `shutdown-marker` once Docker has stopped. The container logs it on its next start. If it's missing, the UPS probably cut power too early | none |
 
 apcupsd isn't monitoring the UPS while these units wait, so the total delay is capped at about 3 minutes.
 
-The container copies both units, and the `install-power-restore` script that installs them, to your persistent directory (e.g. `/data/apcupsd/`) on every start.
+The container copies all three units, and the `install-power-restore` script that installs them, to your persistent directory (e.g. `/data/apcupsd/`) on every start.
 
 ### *Compatibility:*
 
@@ -301,7 +322,7 @@ The units require systemd 239 or later, Docker running as `docker.service`, and 
 
 Not supported: Ubuntu 18.04 (systemd 237), Docker installed as a snap (its service is `snap.docker.dockerd`, not `docker.service`), and hosts without systemd (e.g. Alpine, Unraid).
 
-The units have the same names as the ones shipped with [nut-plus](https://github.com/bnhf/nut-plus), so install only one project's copies on a given host.
+The delay and wait units have the same names as the ones shipped with [nut-plus](https://github.com/bnhf/nut-plus), so install only one project's copies on a given host.
 
 ### *Install:*
 
@@ -318,7 +339,7 @@ Boot delay in seconds (fixed pause before networking starts) [60]:
 Docker wait limit in seconds (until DNS and the clock are ready) [120]:
 ```
 
-Each value can be 0 to 600 seconds, and 0 turns that unit off. The script works out the `powerfail` path from its own location, so it's correct whatever your `HOST_DIR` is, then installs and enables the units and checks them with `systemd-analyze verify`. Run it again at any time to change the values -- the prompts show the installed values. The new values take effect on the next power-failure boot.
+Each value can be 0 to 600 seconds, and 0 turns that unit off. `power-shutdown-marker.service` has no setting and is always installed. The script works out the `powerfail` path from its own location, so it's correct whatever your `HOST_DIR` is, then installs and enables the units and checks them with `systemd-analyze verify`. Run it again at any time to change the values -- the prompts show the installed values. The new values take effect on the next power-failure boot.
 
 To set the values without prompts (e.g. when setting up several hosts the same way):
 
@@ -331,8 +352,8 @@ The script checks that it's running as root on the host, that systemd is 239 or 
 To check the installation without rebooting:
 
 ```bash
-systemctl is-enabled power-restore-delay.service power-restore-wait.service
-sudo systemd-analyze verify /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service
+systemctl is-enabled power-restore-delay.service power-restore-wait.service power-shutdown-marker.service
+sudo systemd-analyze verify /etc/systemd/system/power-restore-delay.service /etc/systemd/system/power-restore-wait.service /etc/systemd/system/power-shutdown-marker.service
 ```
 
 Don't test by creating a `powerfail` file by hand on a production host -- the container treats it as a real power-failure restart and sends the power-restored email and WoL wakes.
@@ -349,6 +370,7 @@ After a power failure, it also reads each unit's result from the host's systemd 
 ```
 2026-10-13 13:29:59 -0600  start.sh: power-restore-delay: held boot for 60s
 2026-10-13 13:29:59 -0600  start.sh: power-restore-wait: held Docker for 30s -- DNS and clock ready
+2026-10-13 13:29:59 -0600  start.sh: power-shutdown-marker: host got past Docker at 2026-10-13 12:41:07 -0600 -- shutdown reached its final stage
 ```
 
 It also logs when a unit isn't installed, isn't enabled, was skipped (usually a `ConditionPathExists` path that doesn't match your `HOST_DIR`), or timed out. On the host itself, this shows the same boot's details:
@@ -371,4 +393,4 @@ sudo systemctl restart systemd-journald
 sudo /data/apcupsd/install-power-restore --remove
 ```
 
-It asks for confirmation first (add `--yes` to skip it), then disables and deletes both units. `systemctl status power-restore-delay power-restore-wait` should then report both units as not found.
+It asks for confirmation first (add `--yes` to skip it), then disables and deletes all three units. `systemctl status power-restore-delay power-restore-wait power-shutdown-marker` should then report them as not found.
